@@ -1,10 +1,12 @@
-var http = require('http'),
-    hostname,
+const cluster = require('cluster')
+const http = require('http')
+let hostname,
     hashQueue = []
-    secret = ''
+    secret = '',
+    idleWorkers = []
 
 function httpRequest(params, callback) {
-    var options = {
+    let options = {
         hostname: hostname,
         path: params.path,
         method: 'GET'
@@ -16,11 +18,11 @@ function httpRequest(params, callback) {
         }
     }
 
-    console.log(`=> new request ${options.path}`)
+    // console.log(`=> new request ${options.path}`)
 
-    var req = http.request(options, (res) => {
+    let req = http.request(options, (res) => {
         res.on('data', (chunk) => {
-            console.log(`response: ${chunk}`)
+            // console.log(`response: ${chunk}`)
             if(callback) {
                 callback(chunk)
             }
@@ -34,36 +36,84 @@ function httpRequest(params, callback) {
     req.end();
 }
 
-function processHash(json, session) {
+function processHash(hash, session, callback) {
 
-    if (json.secret) secret += json.secret
-    if (typeof json.next === 'object') hashQueue = hashQueue.concat(json.next)
-    if (typeof json.next === 'string') hashQueue.push(json.next)
-
-    var hash = hashQueue.splice(0, 1)
-
-    if (hash.length === 0) console.log(`secret is: ${secret}`)
-
-    httpRequest({ path: '/' + hash[0], session: session }, function(res) {
-        var json = JSON.parse(res)
-        processHash(json, session)
+    httpRequest({ path: '/' + hash, session: session }, function(res) {
+        let json = JSON.parse(res)
+        if(callback) {
+            callback(json)
+        }
     })
 }
 
-function getSession() {
-
-    httpRequest({ path: '/get-session' }, function(res) {
-        var json = JSON.parse(res), session = json.session
-
-        httpRequest({ path: '/start', session: session }, function(res) {
-            var json = JSON.parse(res)
-            processHash(json, session)
-        })
-    })
+function appendSecret(s) {
+    secret += s
+    console.log(secret)
 }
 
+if (cluster.isMaster) {
 
-(function() {
     hostname = process.argv[2]
-    getSession()
-})()
+
+    function getSession(callback) {
+
+        httpRequest({ path: '/get-session' }, function(res) {
+            let json = JSON.parse(res), session = json.session
+
+            httpRequest({ path: '/start', session: session }, function(res) {
+                let json = JSON.parse(res)
+                if(callback) {
+                    callback(json, session)
+                }
+            })
+        })
+    }
+
+    function msgHandler(msg) {
+
+        if (msg.json.secret) appendSecret(msg.json.secret)
+        if (typeof msg.json.next === 'object') hashQueue = hashQueue.concat(msg.json.next)
+        if (typeof msg.json.next === 'string') hashQueue.push(msg.json.next)
+
+        let hash = hashQueue.splice(0, 1)
+        if (hash.length === 0) {
+            console.log(`secret is: ${secret}`)
+            return
+        }
+
+        if (msg.id) idleWorkers.push(msg.id)
+
+        let workerId = idleWorkers.splice(0, 1)
+        if (workerId.length > 0) {
+            // notify worker: here's job to do 
+            cluster.workers[workerId[0]].send({ id: workerId[0], hash: hash[0], session: msg.session, hostname: hostname })
+        }
+    }
+
+    const numCPUs = require('os').cpus().length;
+    for (let i = 0; i < numCPUs; i++) {
+        cluster.fork();
+    }
+
+    for (const id in cluster.workers) {
+        cluster.workers[id].on('message', msgHandler);
+        idleWorkers.push(id)
+    }
+
+    
+    (function() {
+        getSession((json, session) => {
+            msgHandler({ json: json, session: session })
+        })
+    })()
+}
+else {
+    process.on('message', (msg) => {
+
+        hostname = msg.hostname
+        processHash(msg.hash, msg.session, (json) => {
+            // notify master: result
+            process.send({ json: json, session: msg.session, id: msg.id })
+        })  
+    })
+}
