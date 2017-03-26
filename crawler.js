@@ -1,9 +1,12 @@
 const cluster = require('cluster')
 const http = require('http')
+const fs = require('fs')
+const numCPUs = require('os').cpus().length
 let hostname,
     hashQueue = []
     secret = '',
-    idleWorkers = []
+    idleWorkers = [],
+    visited = []
 
 function httpRequest(params, callback) {
     let options = {
@@ -23,6 +26,8 @@ function httpRequest(params, callback) {
     let req = http.request(options, (res) => {
         res.on('data', (chunk) => {
             // console.log(`response: ${chunk}`)
+            fs.appendFile('output.tmp', chunk + '\n');
+
             if(callback) {
                 callback(chunk)
             }
@@ -74,23 +79,28 @@ if (cluster.isMaster) {
         if (msg.json.secret) appendSecret(msg.json.secret)
         if (typeof msg.json.next === 'object') hashQueue = hashQueue.concat(msg.json.next)
         if (typeof msg.json.next === 'string') hashQueue.push(msg.json.next)
-
-        let hash = hashQueue.splice(0, 1)
-        if (hash.length === 0) {
-            console.log(`secret is: ${secret}`)
-            return
-        }
+        if (typeof msg.json.id === 'string') visited[msg.json.id] = true
 
         if (msg.id) idleWorkers.push(msg.id)
+        
+        while(idleWorkers.length > 0 && hashQueue.length > 0) {
 
-        let workerId = idleWorkers.splice(0, 1)
-        if (workerId.length > 0) {
-            // notify worker: here's job to do 
-            cluster.workers[workerId[0]].send({ id: workerId[0], hash: hash[0], session: msg.session, hostname: hostname })
+            let hash = hashQueue.splice(0, 1)
+            if(hash.length === 0 || visited[hash[0]] === true) continue;
+
+            let workerId = idleWorkers.splice(0, 1)
+            if (workerId.length > 0) {
+                // notify worker: here's job to do 
+                cluster.workers[workerId[0]].send({ id: workerId[0], hash: hash[0], session: msg.session, hostname: hostname })
+            }
         }
-    }
 
-    const numCPUs = require('os').cpus().length;
+        if (idleWorkers.length === numCPUs && hashQueue.length === 0) {
+            console.log(`secret is: ${secret}`)
+        }
+
+    }
+    
     for (let i = 0; i < numCPUs; i++) {
         cluster.fork();
     }
@@ -100,7 +110,6 @@ if (cluster.isMaster) {
         idleWorkers.push(id)
     }
 
-    
     (function() {
         getSession((json, session) => {
             msgHandler({ json: json, session: session })
