@@ -6,7 +6,8 @@ let hostname,
     hashQueue = []
     secret = '',
     idleWorkers = [],
-    visited = []
+    visited = [],
+    secretArr = []
 
 function httpRequest(params, callback) {
     let options = {
@@ -26,7 +27,7 @@ function httpRequest(params, callback) {
     let req = http.request(options, (res) => {
         res.on('data', (chunk) => {
             // console.log(`response: ${chunk}`)
-            fs.appendFile('output.tmp', chunk + '\n');
+            // fs.appendFile('output.tmp', chunk + '\n');
 
             if(callback) {
                 callback(chunk)
@@ -51,9 +52,10 @@ function processHash(hash, session, callback) {
     })
 }
 
-function appendSecret(s) {
-    secret += s
-    console.log(secret)
+function secretCompare(a, b) {
+    if (a.order < b.order) return -1
+    if (a.order > b.order) return 1
+    return 0
 }
 
 if (cluster.isMaster) {
@@ -76,9 +78,13 @@ if (cluster.isMaster) {
 
     function msgHandler(msg) {
 
-        if (msg.json.secret) appendSecret(msg.json.secret)
-        if (typeof msg.json.next === 'object') hashQueue = hashQueue.concat(msg.json.next)
-        if (typeof msg.json.next === 'string') hashQueue.push(msg.json.next)
+        let newOrder = function(index) {
+            return msg.order + msg.json.depth.toString() + index.toString()
+        }
+
+        if (msg.json.secret) secretArr.push({ order: msg.order, secret: msg.json.secret })
+        if (typeof msg.json.next === 'object') msg.json.next.forEach((n,i) => hashQueue.push({ hash: n, order: newOrder(i) }))
+        if (typeof msg.json.next === 'string') hashQueue.push({ hash: msg.json.next, order: newOrder(0) })
         if (typeof msg.json.id === 'string') visited[msg.json.id] = true
 
         if (msg.id) idleWorkers.push(msg.id)
@@ -86,7 +92,7 @@ if (cluster.isMaster) {
         while(idleWorkers.length > 0 && hashQueue.length > 0) {
 
             let hash = hashQueue.splice(0, 1)
-            if(hash.length === 0 || visited[hash[0]] === true) continue;
+            if(hash.length === 0 || visited[hash[0].hash] === true) continue;
 
             let workerId = idleWorkers.splice(0, 1)
             if (workerId.length > 0) {
@@ -96,6 +102,8 @@ if (cluster.isMaster) {
         }
 
         if (idleWorkers.length === numCPUs && hashQueue.length === 0) {
+            secretArr.forEach((s) => console.log(`${s.order} : ${s.secret}`))
+            secretArr.sort(secretCompare).forEach((s) => secret += s.secret)
             console.log(`secret is: ${secret}`)
         }
 
@@ -112,7 +120,9 @@ if (cluster.isMaster) {
 
     (function() {
         getSession((json, session) => {
-            msgHandler({ json: json, session: session })
+            // fs.appendFile(`output-master.tmp`, JSON.stringify(json) + '\n');
+
+            msgHandler({ json: json, session: session, order: '0' })
         })
     })()
 }
@@ -120,9 +130,10 @@ else {
     process.on('message', (msg) => {
 
         hostname = msg.hostname
-        processHash(msg.hash, msg.session, (json) => {
+        processHash(msg.hash.hash, msg.session, (json) => {
+            // fs.appendFile(`output-worker0${msg.id}.tmp`, JSON.stringify(json) + '\n');
             // notify master: result
-            process.send({ json: json, session: msg.session, id: msg.id })
+            process.send({ json: json, session: msg.session, id: msg.id, order: msg.hash.order })
         })  
     })
 }
