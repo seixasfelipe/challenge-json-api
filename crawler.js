@@ -1,50 +1,17 @@
 const cluster = require('cluster')
-const http = require('http')
 const fs = require('fs')
 const numCPUs = require('os').cpus().length
-let hostname,
-    hashQueue = []
+const httpHelper = require('./httpHelper.js')
+let hashQueue = []
     secret = '',
     idleWorkers = [],
     visited = [],
-    secretArr = []
-
-function httpRequest(params, callback) {
-    let options = {
-        hostname: hostname,
-        path: params.path,
-        method: 'GET'
-    }
-
-    if(params.session) {
-        options.headers = {
-            'Session': params.session
-        }
-    }
-
-    // console.log(`=> new request ${options.path}`)
-
-    let req = http.request(options, (res) => {
-        res.on('data', (chunk) => {
-            // console.log(`response: ${chunk}`)
-            // fs.appendFile('output.tmp', chunk + '\n');
-
-            if(callback) {
-                callback(chunk)
-            }
-        })
-    })
-
-    req.on('error', (e) => {
-        console.log(`problem with request: ${e.message}`)
-    })
-
-    req.end();
-}
+    secretArray = [],
+    hostname = ''
 
 function processHash(hash, session, callback) {
 
-    httpRequest({ path: '/' + hash, session: session }, function(res) {
+    httpHelper.httpRequest({ path: '/' + hash, session: session, hostname: hostname }, function(res) {
         let json = JSON.parse(res)
         if(callback) {
             callback(json)
@@ -64,10 +31,10 @@ if (cluster.isMaster) {
 
     function getSession(callback) {
 
-        httpRequest({ path: '/get-session' }, function(res) {
+        httpHelper.httpRequest({ path: '/get-session', hostname: hostname }, function(res) {
             let json = JSON.parse(res), session = json.session
 
-            httpRequest({ path: '/start', session: session }, function(res) {
+            httpHelper.httpRequest({ path: '/start', session: session, hostname: hostname }, function(res) {
                 let json = JSON.parse(res)
                 if(callback) {
                     callback(json, session)
@@ -82,13 +49,23 @@ if (cluster.isMaster) {
             return msg.order + msg.json.depth.toString() + index.toString()
         }
 
-        if (msg.json.secret) secretArr.push({ order: msg.order, secret: msg.json.secret })
+        if(!msg.json.hasOwnProperty('next') && !msg.json.hasOwnProperty('NeXt') && !msg.json.hasOwnProperty('secret')) {
+            console.warn(`Can't find next, NeXt or secret properties`)
+            console.log(msg.json)
+        }
+
+        // Decode message json object (secret, next steps, id, etc)
+        if (msg.json.secret) secretArray.push({ order: msg.order, secret: msg.json.secret })
         if (typeof msg.json.next === 'object') msg.json.next.forEach((n,i) => hashQueue.push({ hash: n, order: newOrder(i) }))
         if (typeof msg.json.next === 'string') hashQueue.push({ hash: msg.json.next, order: newOrder(0) })
+        if (typeof msg.json.NeXt === 'object') msg.json.NeXt.forEach((n,i) => hashQueue.push({ hash: n, order: newOrder(i) }))
+        if (typeof msg.json.NeXt === 'string') hashQueue.push({ hash: msg.json.NeXt, order: newOrder(0) })
         if (typeof msg.json.id === 'string') visited[msg.json.id] = true
 
+        // Put current worker in the idle worker list
         if (msg.id) idleWorkers.push(msg.id)
         
+        // Search new job to workers
         while(idleWorkers.length > 0 && hashQueue.length > 0) {
 
             let hash = hashQueue.splice(0, 1)
@@ -97,20 +74,25 @@ if (cluster.isMaster) {
             let workerId = idleWorkers.splice(0, 1)
             if (workerId.length > 0) {
                 // notify worker: here's job to do 
-                cluster.workers[workerId[0]].send({ id: workerId[0], hash: hash[0], session: msg.session, hostname: hostname })
+                cluster.workers[workerId[0]].send({ id: workerId[0], hash: hash[0], session: msg.session })
             }
         }
 
         if (idleWorkers.length === numCPUs && hashQueue.length === 0) {
-            secretArr.forEach((s) => console.log(`${s.order} : ${s.secret}`))
-            secretArr.sort(secretCompare).forEach((s) => secret += s.secret)
+            // secretArray.forEach((s) => console.log(`${s.order} : ${s.secret}`))
+            secretArray.sort(secretCompare).forEach((s) => secret += s.secret)
             console.log(`secret is: ${secret}`)
+            process.exit(1);
         }
 
     }
+
+    let workerEnv = {
+        "HOSTNAME": hostname 
+    }
     
     for (let i = 0; i < numCPUs; i++) {
-        cluster.fork();
+        cluster.fork(workerEnv);
     }
 
     for (const id in cluster.workers) {
@@ -127,9 +109,10 @@ if (cluster.isMaster) {
     })()
 }
 else {
+    hostname = process.env['HOSTNAME']
+
     process.on('message', (msg) => {
 
-        hostname = msg.hostname
         processHash(msg.hash.hash, msg.session, (json) => {
             // fs.appendFile(`output-worker0${msg.id}.tmp`, JSON.stringify(json) + '\n');
             // notify master: result
