@@ -65,7 +65,7 @@ function followNextStepOrShowMeTheSecret(msg) {
         }
     }
 
-    console.log(`idleWorkers.length: ${idleWorkers.length}, maxWorkers: ${maxWorkers}, hashQueue.length: ${hashQueue.length}`)
+    // console.log(`idleWorkers.length: ${idleWorkers.length}, maxWorkers: ${maxWorkers}, hashQueue.length: ${hashQueue.length}`)
 
     if (idleWorkers.length === maxWorkers && hashQueue.length === 0) {
 

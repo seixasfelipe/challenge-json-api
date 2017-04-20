@@ -28,6 +28,7 @@ function httpRequest(params, callback) {
 
     req.on('error', (e) => {
         console.log(`problem with request: ${e.message}`)
+        console.log(e)
     })
 
     req.end();
